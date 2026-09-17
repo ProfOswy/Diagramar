@@ -263,11 +263,18 @@ footer.credit{ text-align:center; font-size:0.72rem; color:var(--ink-faint); mar
   body.printing-results .diagram-block{
     break-inside: avoid;
   }
+  /* itens de lista com desenho embutido (ex.: a vista de cada seção cortada) também não devem quebrar
+     no meio — listas curtas de texto não são afetadas, já que break-inside:avoid não faz diferença
+     quando o item já cabe inteiro numa página */
+  body.printing-results .step-body li{ break-inside: avoid; }
   body.printing-results details.step{ break-inside: auto; }
-  body.printing-results details.step > summary{ break-after: avoid; }
+  /* break-after:avoid no título do accordion (ex.: "1. Encontrar as Reações de Apoio") foi removido:
+     ele forçava o título a ficar "colado" ao substep seguinte (que tem break-inside:avoid), e quando
+     esse substep não cabia no resto da página, o par inteiro pulava pra próxima, deixando um vão em
+     branco enorme na página atual — pior que, raramente, um título sozinho no fim da página. */
   body.printing-results .substep h4, body.printing-results .diagram-block h3{ break-after: avoid; }
   body.printing-results svg{ max-width:100%; }
-  body.printing-results #printExerciseBlock{ break-inside: avoid; break-after: avoid; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid var(--border-strong); }
+  body.printing-results #printExerciseBlock{ break-inside: avoid; break-after: avoid; margin-bottom:16px; padding:4px 0 10px; border-bottom:2px solid var(--border-strong); }
   body.printing-results #printExerciseBlock svg{ max-width:640px; }
 }
 
@@ -630,7 +637,28 @@ function buildActionsFromResult(model, res){
     if(Math.abs(pl.Fy)>1e-9) pointFy.push({x, Fy:pl.Fy, isReaction:false});
   });
   model.momentsByNode.forEach(m=> moments.push({x:nodes[m.nodeIndex].x, M:m.M, isReaction:false}));
-  const dist = model.elements.filter(e=>Math.abs(e.qa)>1e-9||Math.abs(e.qb)>1e-9).map(e=>({x1:nodes[e.n1].x, x2:nodes[e.n2].x, qa:e.qa, qb:e.qb}));
+  // model.elements é a malha de elementos finitos — quando uma carga distribuída de valor contínuo (ex.:
+  // uniforme) tem uma força concentrada bem no meio dela, a malha PRECISA de um nó ali (pra capturar o
+  // salto no cortante), o que fatia essa única carga em dois ou mais elementos consecutivos. Pra fins de
+  // narrativa/desenho, isso não deve aparecer como "duas cargas distribuídas": os elementos consecutivos
+  // cuja distribuição é a mesma reta contínua (qb de um bate com o qa do próximo) são fundidos de volta
+  // num único trecho, exatamente como o usuário desenhou.
+  const distRaw = model.elements.filter(e=>Math.abs(e.qa)>1e-9||Math.abs(e.qb)>1e-9).map(e=>({x1:nodes[e.n1].x, x2:nodes[e.n2].x, qa:e.qa, qb:e.qb})).sort((a,b)=>a.x1-b.x1);
+  // uma rótula é uma quebra FÍSICA da viga em corpos livres distintos — mesmo que o valor da carga
+  // distribuída seja contínuo dos dois lados, ela não pode ser fundida atravessando uma rótula, senão
+  // o trecho de cada lado (que só aceita cargas 100% contidas nele) deixa de "enxergar" essa carga por
+  // inteiro e ela simplesmente some do desenho do corpo livre isolado.
+  const hingeXs = new Set(nodes.filter(n=>n.hinge).map(n=>round2(n.x)));
+  const dist=[];
+  distRaw.forEach(seg=>{
+    const prev = dist[dist.length-1];
+    const atHinge = prev && hingeXs.has(round2(seg.x1));
+    if(prev && !atHinge && Math.abs(prev.x2-seg.x1)<1e-6 && Math.abs(prev.qb-seg.qa)<1e-6){
+      prev.x2 = seg.x2; prev.qb = seg.qb;
+    } else {
+      dist.push({...seg});
+    }
+  });
   return {pointFx, pointFy, moments, dist};
 }
 function findCriticalX(model, sec){
@@ -1692,7 +1720,7 @@ function sectionCutDiagramSVG(model, cuts){
   const L = model.nodes[model.nodes.length-1].x || 1;
   const x0=50, x1=550, y=58;
   const toPx = x => x0 + (x/L)*(x1-x0);
-  let svg = `<svg viewBox="0 0 600 148" width="100%" height="130" style="max-width:560px;display:block;margin:8px 0;">`;
+  let svg = `<svg viewBox="0 0 600 148" width="100%" height="130" style="max-width:560px;display:block;margin:8px auto;">`;
   svg += `<defs><filter id="sectionSketch" filterUnits="userSpaceOnUse" x="-40" y="-40" width="680" height="228">
     <feTurbulence type="fractalNoise" baseFrequency="0.01 0.05" numOctaves="2" seed="4" result="n"/>
     <feDisplacementMap in="SourceGraphic" in2="n" scale="1.5" xChannelSelector="R" yChannelSelector="G"/>
@@ -1747,15 +1775,148 @@ function sectionCutDiagramSVG(model, cuts){
     svg += `<line x1="${px.toFixed(1)}" y1="24" x2="${px.toFixed(1)}" y2="${(y+28).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1" stroke-dasharray="3,3" opacity="0.5"/>`;
   });
 
-  // marca TODAS as seções cortadas (uma em cada trecho entre mudanças de carregamento/apoio)
+  // marca TODAS as seções cortadas (uma em cada trecho entre mudanças de carregamento/apoio), cada uma
+  // com sua cota — a distância, medida a partir do início da viga, até aquele corte
+  const cotaY = y+58;
+  svg += `<line x1="${x0}" y1="${(y+18).toFixed(1)}" x2="${x0}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
   cuts.forEach(c=>{
     const cutPx = toPx(clamp(c.x,0,L));
     svg += `<line x1="${cutPx.toFixed(1)}" y1="16" x2="${cutPx.toFixed(1)}" y2="${(y+36).toFixed(1)}" stroke="var(--accent)" stroke-width="2.2" filter="url(#sectionSketch)"/>`;
     const labelX = clamp(cutPx,14,586);
     svg += `<circle cx="${labelX.toFixed(1)}" cy="10" r="9" fill="var(--accent)"/>`;
     svg += `<text x="${labelX.toFixed(1)}" y="13.5" text-anchor="middle" font-family="${HAND_FONT}" font-weight="700" font-size="11" fill="var(--surface)">${c.idx}</text>`;
+    // cota individual desse corte, do início da viga até o corte — usa c.label (posição teórica, exata),
+    // não c.x (que é só a posição do TRAÇO na tela, deslocada pra não cair em cima de outro símbolo)
+    svg += `<line x1="${cutPx.toFixed(1)}" y1="${(y+18).toFixed(1)}" x2="${cutPx.toFixed(1)}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+    svg += `<line x1="${(cutPx-4).toFixed(1)}" y1="${(cotaY+4).toFixed(1)}" x2="${(cutPx+4).toFixed(1)}" y2="${(cotaY-4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.2"/>`;
+    const cotaLabel = fmtNum(c.label,2);
+    svg += `<text x="${cutPx.toFixed(1)}" y="${(cotaY+16).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="9.5" fill="var(--accent)">${cotaLabel}</text>`;
   });
+  svg += `<line x1="${(x0-4).toFixed(1)}" y1="${(cotaY+4).toFixed(1)}" x2="${(x0+4).toFixed(1)}" y2="${(cotaY-4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.2"/>`;
   svg += `</svg>`;
+  return svg;
+}
+
+// Vista à esquerda de UMA seção cortada: o trecho da viga entre x=0 e o corte, já isolado como corpo
+// livre, com TODAS as forças que entram nas equações de N, V e M daquela seção (reações e cargas
+// aplicadas) desenhadas na posição real, mais uma cota mostrando a que distância do início da viga o
+// corte foi feito. seg.cut já vem praticamente exato (a menos de uma fração ínfima, CUT_EPS, usada só
+// internamente pra decidir de que lado de uma quebra o corte está) — por isso a cota mostra direto o
+// valor "teórico": 0 pra um corte colado no início da viga, o próprio número redondo da quebra, etc.
+function sectionCutFreeBodySVG(seg, fullL){
+  const spanLen = Math.max(seg.cut, 1e-6);
+  const x0=60, x1=560, y=90;
+  const toPx = x => x0 + (clamp(x,0,spanLen)/spanLen)*(x1-x0);
+  let svg = `<defs>
+    <marker id="scfArrLoad" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0.4 L8,4 L0,7.6 Z" fill="var(--v-color)"/></marker>
+    <marker id="scfArrX" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0.4 L8,4 L0,7.6 Z" fill="var(--n-color)"/></marker>
+  </defs>`;
+
+  svg += `<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="var(--ink)" stroke-width="4.4" stroke-linecap="round"/>`;
+  // hachura indicando a face cortada (convenção usual pra "seção imaginária")
+  for(let k=-3;k<=3;k++){
+    svg += `<line x1="${(x1-6+k*5).toFixed(1)}" y1="${(y-16).toFixed(1)}" x2="${(x1+6+k*5).toFixed(1)}" y2="${(y+16).toFixed(1)}" stroke="var(--danger)" stroke-width="1.3" opacity="0.5"/>`;
+  }
+  svg += `<line x1="${x1.toFixed(1)}" y1="${(y-26).toFixed(1)}" x2="${x1.toFixed(1)}" y2="${(y+26).toFixed(1)}" stroke="var(--danger)" stroke-width="2.2"/>`;
+  svg += `<text x="${x1.toFixed(1)}" y="${(y-34).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10.5" font-weight="700" fill="var(--danger)">(${seg.idx})</text>`;
+
+  const fxLevels={};
+  {
+    const items=seg.fxParts.map((o,idx)=>({idx, px:toPx(o.x), half:(`${o.sym} = ${fmtNum(o.val)} ${uF()}`).length*3.4+5})).sort((a,b)=>a.px-b.px);
+    const levelEnds=[];
+    items.forEach(it=>{
+      let lvl=0;
+      while(levelEnds[lvl]!==undefined && it.px-it.half < levelEnds[lvl]+4) lvl++;
+      levelEnds[lvl]=it.px+it.half;
+      fxLevels[it.idx]=lvl;
+    });
+  }
+  seg.fxParts.forEach((o,idx)=>{
+    const px=toPx(o.x), sign=o.val>=0?1:-1, len=28;
+    const yArrow = y-30-(fxLevels[idx]||0)*16;
+    svg += `<line x1="${(px-sign*len).toFixed(1)}" y1="${yArrow.toFixed(1)}" x2="${px.toFixed(1)}" y2="${yArrow.toFixed(1)}" stroke="var(--n-color)" stroke-width="2.2" marker-end="url(#scfArrX)"/>`;
+    svg += `<text x="${px.toFixed(1)}" y="${(yArrow-8).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--n-color)">${o.sym} = ${fmtNum(o.val)} ${uF()}</text>`;
+  });
+  // pré-calcula "pistas" (níveis) pra evitar que dois vetores de força caiam próximos demais em x — sem
+  // isso, uma reação e uma carga aplicada perto uma da outra (ou uma resultante de carga distribuída bem
+  // ao lado de outra força) desenham setas e rótulos praticamente em cima um do outro. Mesma ideia já usada
+  // no DCL geral (horizLevelsDCL): agrupa por lado (pra cima/pra baixo) e empurra pra uma pista mais longe
+  // da viga quando colide com a pista anterior.
+  const vmLevels={};
+  {
+    const bySide={up:[], down:[]};
+    seg.vmParts.forEach((o,idx)=>{
+      const sign=o.val>=0?-1:1, side= sign>0?'up':'down';
+      const label=`${o.sym} = ${fmtNum(o.val)} ${uF()}`;
+      // força cujo x cai perto da borda direita (o corte, onde ficam a hachura e o número da seção) precisa
+      // de uma pista extra, senão o rótulo esbarra na hachura mesmo sem colidir com nenhuma outra força
+      const nearCut = (x1-toPx(o.x)) < 24;
+      bySide[side].push({idx, px:toPx(o.x), half: label.length*3.4+5, nearCut});
+    });
+    ['up','down'].forEach(side=>{
+      const items=bySide[side].sort((a,b)=>a.px-b.px);
+      const levelEnds=[];
+      items.forEach(it=>{
+        let lvl=0;
+        while(levelEnds[lvl]!==undefined && it.px-it.half < levelEnds[lvl]+4) lvl++;
+        levelEnds[lvl]=it.px+it.half;
+        lvl += it.nearCut?1:0;
+        vmLevels[it.idx]=lvl;
+      });
+    });
+  }
+  // maior extensão que algum vetor/rótulo "pra baixo" (sinal>=0) alcança — usada logo abaixo pra
+  // empurrar a cota o suficiente pra nunca ficar por baixo de um número/letra de força
+  let maxDownLabelY = y+40;
+  seg.vmParts.forEach((o,idx)=>{
+    if(o.val>=0){
+      const len=32+(vmLevels[idx]||0)*22;
+      const labelY = (y+len)+14;
+      if(labelY>maxDownLabelY) maxDownLabelY=labelY;
+    }
+  });
+  seg.vmParts.forEach((o,idx)=>{
+    const px=toPx(o.x), sign=o.val>=0?-1:1;
+    const len=32+(vmLevels[idx]||0)*22;
+    const yTop=y-(sign>0?len:-len);
+    svg += `<line x1="${px.toFixed(1)}" y1="${yTop.toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y-(sign>0?2:-2)).toFixed(1)}" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#scfArrLoad)"/>`;
+    svg += `<text x="${px.toFixed(1)}" y="${(yTop-(sign>0?6:-14)).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--v-color)">${o.sym} = ${fmtNum(o.val)} ${uF()}</text>`;
+  });
+  const mLevels={};
+  {
+    const items=seg.mParts.map((o,idx)=>({idx, px:toPx(o.x), half:22})).sort((a,b)=>a.px-b.px);
+    const levelEnds=[];
+    items.forEach(it=>{
+      let lvl=0;
+      while(levelEnds[lvl]!==undefined && it.px-it.half < levelEnds[lvl]+4) lvl++;
+      levelEnds[lvl]=it.px+it.half;
+      mLevels[it.idx]=lvl;
+    });
+  }
+  seg.mParts.forEach((o,idx)=>{
+    const px=toPx(o.x), arcY=y-46-(mLevels[idx]||0)*20;
+    svg += `<path d="M ${(px-10).toFixed(1)} ${arcY.toFixed(1)} A 10 10 0 1 1 ${(px+10).toFixed(1)} ${arcY.toFixed(1)}" fill="none" stroke="var(--m-color)" stroke-width="2.1" marker-end="url(#scfArrLoad)"/>`;
+    svg += `<text x="${px.toFixed(1)}" y="${(arcY-16).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--m-color)">${o.symPlain||o.sym} = ${fmtNum(o.val)} ${uM()}</text>`;
+  });
+  if(!seg.fxParts.length && !seg.vmParts.length && !seg.mParts.length){
+    svg += `<text x="${((x0+x1)/2).toFixed(1)}" y="${(y-16).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Sans',sans-serif" font-size="11" fill="var(--ink-faint)">(nenhuma carga à esquerda deste corte)</text>`;
+  }
+
+  // cota: distância do início da viga (x=0) até o corte — afastada o bastante da viga (e do vetor/rótulo
+  // "pra baixo" mais extenso, calculado acima) pra nunca ficar por cima de nenhum número/letra de força
+  const cotaY = Math.max(y+62, maxDownLabelY+26);
+  svg += `<line x1="${x0}" y1="${(cotaY-16).toFixed(1)}" x2="${x0}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  svg += `<line x1="${x1.toFixed(1)}" y1="${(cotaY-16).toFixed(1)}" x2="${x1.toFixed(1)}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  svg += `<line x1="${x0}" y1="${cotaY.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${cotaY.toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  svg += `<line x1="${(x0-5).toFixed(1)}" y1="${(cotaY+5).toFixed(1)}" x2="${(x0+5).toFixed(1)}" y2="${(cotaY-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.4"/>`;
+  svg += `<line x1="${(x1-5).toFixed(1)}" y1="${(cotaY+5).toFixed(1)}" x2="${(x1+5).toFixed(1)}" y2="${(cotaY-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.4"/>`;
+  const cotaLabel = fmtNum(seg.cut,2)+' '+uL();
+  svg += `<rect x="${((x0+x1)/2-36).toFixed(1)}" y="${(cotaY-18).toFixed(1)}" width="72" height="15" fill="var(--surface)"/>`;
+  svg += `<text x="${((x0+x1)/2).toFixed(1)}" y="${(cotaY-6).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" fill="var(--ink-dim)">${cotaLabel}</text>`;
+
+  const viewBoxH = Math.max(216, Math.ceil(cotaY+20));
+  const heightPx = Math.round(190 * viewBoxH/216);
+  svg = `<svg viewBox="0 0 620 ${viewBoxH}" width="100%" height="${heightPx}" style="max-width:560px;display:block;margin:8px auto;overflow:visible;">` + svg + `</svg>`;
   return svg;
 }
 function describePointAt(model, letterFn, x){
@@ -1790,25 +1951,35 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
   model.nodes.forEach(n=> bpSet.add(+n.x.toFixed(6)));
   const bpXs = Array.from(bpSet).sort((a,b)=>a-b);
 
-  // um corte é feito em CADA trecho entre dois pontos de quebra consecutivos — sempre perto do início do
-  // trecho, exceto no último trecho, onde o corte fica perto do FIM, garantindo uma seção bem junto de
-  // cada extremidade da viga (início e fim)
+  // um corte é feito em CADA trecho entre dois pontos de quebra consecutivos — sempre logo após o início
+  // do trecho, exceto no último trecho, onde o corte fica logo antes do FIM, garantindo uma seção bem
+  // junto de cada extremidade da viga (início e fim). A posição usada nos cálculos (seg.cut) fica a uma
+  // distância ÍNFIMA (CUT_EPS) do ponto de quebra — o suficiente pra decidir de que lado de uma carga
+  // exatamente sobre a quebra o corte está, mas pequena demais pra aparecer arredondada em 2 casas
+  // decimais: a cota exibida ao aluno é, na prática, a distância "teórica" (0, 5, etc.), nunca um valor
+  // como "4,95" — que não tem significado físico e só existia por causa do deslocamento visual do corte.
+  // seg.visualX guarda separadamente a posição só para DESENHAR a marca do corte na viga geral (mais
+  // afastada da quebra, ~5% do trecho), pra marca não cair em cima do símbolo do apoio/carga ali.
+  const CUT_EPS = 1e-4;
   const segments=[];
   for(let i=0;i<bpXs.length-1;i++){
     const left=bpXs[i], right=bpXs[i+1];
     if(right-left < 1e-6) continue;
     const isLast = i===bpXs.length-2;
-    const cut = isLast? (right-(right-left)*0.05) : (left+(right-left)*0.05);
-    segments.push({idx:segments.length+1, left, right, cut});
+    const cut = isLast? (right-CUT_EPS) : (left+CUT_EPS);
+    const visualX = isLast? (right-(right-left)*0.05) : (left+(right-left)*0.05);
+    segments.push({idx:segments.length+1, left, right, cut, visualX});
   }
   // se o trecho inicial e o trecho final forem o mesmo (viga com um único trecho, sem quebras internas),
   // o passo acima só gera um corte perto do fim — adiciona também um corte perto do início nesse caso,
   // para sempre haver seção nas duas pontas da viga
   if(segments.length===1){
     const only=segments[0];
-    segments.unshift({idx:0, left:only.left, right:only.right, cut: only.left+(only.right-only.left)*0.05});
+    segments.unshift({idx:0, left:only.left, right:only.right, cut: only.left+CUT_EPS, visualX: only.left+(only.right-only.left)*0.05});
     segments.forEach((seg,i)=> seg.idx=i+1);
   }
+
+  const fullL = model.nodes[model.nodes.length-1].x || 1;
 
   function computeAt(xCut){
     const fxParts=[];
@@ -1838,23 +2009,26 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
     actions.moments.forEach(m=>{
       if(m.x >= xCut-1e-9) return;
       if(m.isReaction){ const nd=nodeAtX(model,m.x); const L=letterOf(nd);
-        mParts.push({sym:'M'+subL(L), val:m.M, x:m.x, label:`Momento de engastamento M${subL(L)}, no apoio ${L}: M${subL(L)} = ${fmtNum(m.M)} ${uM()}`}); }
+        // sym usa <span> pra sobrescrito (subL) — só é seguro em texto HTML comum (narrativa, <div class="eq">).
+        // Dentro de um <text> de SVG (sectionCutFreeBodySVG) isso quebra o parser e "vaza" HTML pra fora da
+        // tag svg — por isso symPlain, sem marcação nenhuma, pra usar especificamente ali.
+        mParts.push({sym:'M'+subL(L), symPlain:'M'+L, val:m.M, x:m.x, label:`Momento de engastamento M${subL(L)}, no apoio ${L}: M${subL(L)} = ${fmtNum(m.M)} ${uM()}`}); }
       else { const idx=mAppliedAll.indexOf(m);
-        mParts.push({sym:mSyms[idx], val:m.M, x:m.x, label:`Momento aplicado ${mSyms[idx]}: ${mSyms[idx]} = ${fmtNum(m.M)} ${uM()}`}); }
+        mParts.push({sym:mSyms[idx], symPlain:mSyms[idx], val:m.M, x:m.x, label:`Momento aplicado ${mSyms[idx]}: ${mSyms[idx]} = ${fmtNum(m.M)} ${uM()}`}); }
     });
     return { fxParts, vmParts, mParts, Nval: sec.N(xCut), Vval: sec.V(xCut,'right'), Mval: sec.M(xCut,'right') };
   }
 
   segments.forEach(seg=>{ Object.assign(seg, computeAt(seg.cut)); });
 
-  const cutsForDiagram = segments.map(seg=>({x:seg.cut, idx:seg.idx}));
+  const cutsForDiagram = segments.map(seg=>({x:seg.visualX, label:seg.cut, idx:seg.idx}));
 
   s += stepBlock(startNum, null, 'Método das Seções', `
     <p>Com todas as reações determinadas, os esforços internos em qualquer seção são obtidos imaginando um corte na viga e aplicando as equações de equilíbrio no trecho <strong>à esquerda</strong> do corte (o resultado é o mesmo usando o trecho à direita).</p>
     <p>Você deve fazer um corte em cada trecho onde houver mudança no tipo ou na distribuição do carregamento (como o início e o fim de cargas distribuídas, a aplicação de forças pontuais ou de momentos concentrados) e nos pontos de apoio. Abaixo está a própria viga montada nesta atividade, com todas as seções que precisam ser cortadas numeradas:</p>
     ${sectionCutDiagramSVG(model, cutsForDiagram)}
-    <p>Isso resulta em <strong>${segments.length}</strong> ${segments.length===1?'seção':'seções'} a analisar nesta viga:</p>
-    <ul>${segments.map(seg=>`<li><strong>Seção ${seg.idx}:</strong> entre ${describePointAt(model,letterOf,seg.left)} e ${describePointAt(model,letterOf,seg.right)}</li>`).join('')}</ul>
+    <p>Isso resulta em <strong>${segments.length}</strong> ${segments.length===1?'seção':'seções'} a analisar nesta viga. Para cada uma, veja abaixo a vista do trecho <strong>à esquerda do corte</strong> — é exatamente esse pedaço, com essas forças, que entra nas equações de N, V e M da seção:</p>
+    <ul>${segments.map(seg=>`<li><strong>Seção ${seg.idx}:</strong> entre ${describePointAt(model,letterOf,seg.left)} e ${describePointAt(model,letterOf,seg.right)}${sectionCutFreeBodySVG(seg, fullL)}</li>`).join('')}</ul>
     <div class="eq c-n">N = −Σ Fx (à esquerda do corte)</div>
     <div class="eq c-v">V =  Σ Fy (à esquerda do corte)</div>
     <div class="eq c-m">M =  Σ [Fy·(distância até o corte)] − Σ M aplicado (à esquerda do corte)</div>
@@ -1867,11 +2041,14 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
     <p>O esforço normal N é a força interna <strong>perpendicular à seção transversal</strong>, atuando na direção do eixo da viga — é ele quem gera tração ou compressão na barra.</p>
     <p><strong>Como saber o sinal:</strong> N <strong>positivo</strong> indica <strong>tração</strong> (a seção tende a se alongar, "puxada" para fora); N <strong>negativo</strong> indica <strong>compressão</strong> (a seção tende a encurtar, "empurrada" para dentro).</p>
     ${gIconNormal()}
+    <p class="hint">Relembrando onde cada seção foi cortada nesta viga:</p>
+    ${sectionCutDiagramSVG(model, cutsForDiagram)}
     ${segments.map(seg=>{
       const fxTermsSym = seg.fxParts.map(o=>o.sym).join(' + ');
       const fxTermsNum = seg.fxParts.map(o=>`(${fmtNum(o.val)})`).join(' + ');
       const posLabel = `(${seg.idx})`;
       return `<div class="substep"><h4>Seção ${seg.idx} — entre ${describePointAt(model,letterOf,seg.left)} e ${describePointAt(model,letterOf,seg.right)}</h4>
+        ${sectionCutFreeBodySVG(seg, fullL)}
         ${seg.fxParts.length
           ? `<ul>${seg.fxParts.map(o=>`<li>${o.label}</li>`).join('')}</ul>
              <div class="eq c-n">N${posLabel} = −[${fxTermsSym}] = −[${fxTermsNum}] = <strong><u>${fmtNum(seg.Nval)} ${uF()}</u></strong></div>`
@@ -1888,11 +2065,14 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
     <p>O esforço cortante V é a força interna <strong>paralela à seção transversal</strong>, que tende a fazer uma parte da viga deslizar (cisalhar) em relação à parte vizinha.</p>
     <p><strong>Como saber o sinal:</strong> imagine a viga cortada em duas partes bem próximas uma da outra. V é <strong>positivo</strong> quando o par de forças internas nas duas faces do corte tende a girar esse elemento no <strong>sentido horário</strong>; é <strong>negativo</strong> quando tende a girá-lo no sentido <strong>anti-horário</strong>.</p>
     ${gIconCortante()}
+    <p class="hint">Relembrando onde cada seção foi cortada nesta viga:</p>
+    ${sectionCutDiagramSVG(model, cutsForDiagram)}
     ${segments.map(seg=>{
       const vmTermsSym = seg.vmParts.map(o=>o.sym).join(' + ');
       const vmTermsNum = seg.vmParts.map(o=>`(${fmtNum(o.val)})`).join(' + ');
       const posLabel = `(${seg.idx})`;
       return `<div class="substep"><h4>Seção ${seg.idx} — entre ${describePointAt(model,letterOf,seg.left)} e ${describePointAt(model,letterOf,seg.right)}</h4>
+        ${sectionCutFreeBodySVG(seg, fullL)}
         ${seg.vmParts.length
           ? `<ul>${seg.vmParts.map(o=>`<li>${o.label}</li>`).join('')}</ul>
              <div class="eq c-v">V${posLabel} = ${vmTermsSym} = ${vmTermsNum} = <strong><u>${fmtNum(seg.Vval)} ${uF()}</u></strong></div>`
@@ -1907,6 +2087,8 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
     <p>O momento fletor M é o momento interno que tende a <strong>curvar</strong> a viga, tracionando um lado da seção e comprimindo o outro.</p>
     <p><strong>Como saber o sinal:</strong> M <strong>positivo</strong> traciona a fibra <strong>inferior</strong> da viga e comprime a superior — a viga fica côncava para cima, como um sorriso. M <strong>negativo</strong> traciona a fibra <strong>superior</strong> e comprime a inferior — côncava para baixo, como uma carinha triste, comum sobre apoios internos de vigas contínuas ou em engastes.</p>
     ${gIconMomentoFletor()}
+    <p class="hint">Relembrando onde cada seção foi cortada nesta viga:</p>
+    ${sectionCutDiagramSVG(model, cutsForDiagram)}
     ${segments.map(seg=>{
       const momentTerms = [
         ...seg.vmParts.map(o=> `${o.sym}·(distância até o corte) = (${fmtNum(o.val)})·(${fmtNum(seg.cut-o.x)}) = ${fmtNum(o.val*(seg.cut-o.x))} ${uM()}`),
@@ -1915,6 +2097,7 @@ function sectionMethodStepsHTML(model, res, actions, sec, extremes, startNum){
       const mSign = seg.Mval>1e-6? 'positivo' : (seg.Mval<-1e-6? 'negativo':'nulo');
       const posLabel = `(${seg.idx})`;
       return `<div class="substep"><h4>Seção ${seg.idx} — entre ${describePointAt(model,letterOf,seg.left)} e ${describePointAt(model,letterOf,seg.right)}</h4>
+        ${sectionCutFreeBodySVG(seg, fullL)}
         ${momentTerms.length ? `<ul>${momentTerms.map(t=>`<li>${t}</li>`).join('')}</ul>` : `<p>Não há força vertical nem momento aplicado à esquerda deste corte.</p>`}
         <div class="eq c-m">M${posLabel} = <strong><u>${fmtNum(seg.Mval)} ${uM()}</u></strong></div>
         <p>${mSign==='nulo'? `M${posLabel} ≈ 0, não há tração predominante de nenhum dos lados.` : `M${posLabel} é ${mSign}, logo a fibra ${seg.Mval>0?'inferior':'superior'} está tracionada neste trecho.`}</p>
@@ -1940,7 +2123,7 @@ function concentratedDistContextSVG(model, d, R, xbar){
   const loadMarkerId = 'ctxArrLoad'+seq;
   const concMarkerId = 'ctxArrConc'+seq;
 
-  let svg = `<svg viewBox="0 0 600 190" width="100%" height="168" style="max-width:560px;display:block;margin:8px 0;">`;
+  let svg = `<svg viewBox="0 0 600 190" width="100%" height="168" style="max-width:560px;display:block;margin:8px auto;">`;
   svg += `<defs>
     <filter id="${filterId}" filterUnits="userSpaceOnUse" x="-40" y="-40" width="680" height="270">
       <feTurbulence type="fractalNoise" baseFrequency="0.01 0.05" numOctaves="2" seed="4" result="n"/>
@@ -2207,10 +2390,11 @@ function gerberSplitOverviewSVG(segments, hingeLabel){
   const n = segments.length;
   const panelW=210, gap=30, y=100;
   const totalW = n*panelW + (n-1)*gap + 20;
-  let svg = `<svg viewBox="0 0 ${totalW} 210" width="100%" height="190" style="display:block;margin:8px 0;max-width:${Math.min(totalW,880)}px;" preserveAspectRatio="xMidYMid meet">`;
+  let svg = `<svg viewBox="0 0 ${totalW} 210" width="100%" height="190" style="display:block;margin:8px auto;max-width:${Math.min(totalW,880)}px;" preserveAspectRatio="xMidYMid meet">`;
   svg += `<defs>
     <marker id="ovArrLoad" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0.4 L8,4 L0,7.6 Z" fill="var(--v-color)"/></marker>
     <marker id="ovArrHinge" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0.4 L8,4 L0,7.6 Z" fill="var(--danger)"/></marker>
+    <marker id="ovArrReact" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0.4 L8,4 L0,7.6 Z" fill="var(--accent)"/></marker>
   </defs>`;
 
   segments.forEach((seg,i)=>{
@@ -2227,35 +2411,54 @@ function gerberSplitOverviewSVG(segments, hingeLabel){
     svg += `<text x="${(x0+x1)/2}" y="${(y+58).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--ink-dim)">Trecho ${seg.idx}</text>`;
     svg += `<text x="${(x0+x1)/2}" y="${(y+72).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="9.5" fill="var(--ink-faint)">${fmtNum(seg.left,2)}–${fmtNum(seg.right,2)} ${uL()}</text>`;
 
-    // apoios próprios — só o símbolo e a letra da reação, sem valor (incógnitas nesta etapa)
+    // apoios próprios — no lugar do símbolo do apoio (triângulo), mostra direto a(s) reação(ões) como
+    // vetor(es), já na direção ASSUMIDA como positiva: Ry pra CIMA (por isso desenhada de baixo pra cima,
+    // igual à convenção do DCL final — reação positiva empurra a viga pra cima) e Rx pra a DIREITA. É essa
+    // suposição que a equação de equilíbrio resolve: se o resultado sair negativo, a seta de verdade
+    // aponta pro lado oposto do desenhado aqui. Ainda incógnitas nesta etapa, por isso sem valor.
     seg.ownSupports.forEach(sp=>{
       const px = toPx(sp.x);
-      if(sp.urot){
-        svg += `<rect x="${(px-4).toFixed(1)}" y="${(y-16).toFixed(1)}" width="8" height="32" fill="var(--ink-dim)"/>`;
-      } else {
-        svg += `<path d="M ${px.toFixed(1)} ${y} L ${(px-10).toFixed(1)} ${y+16} L ${(px+10).toFixed(1)} ${y+16} Z" fill="none" stroke="var(--ink-dim)" stroke-width="2.2" stroke-linejoin="round"/>`;
+      if(sp.uy){
+        svg += `<line x1="${px.toFixed(1)}" y1="${(y+26).toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y+4).toFixed(1)}" stroke="var(--accent)" stroke-width="2.4" marker-end="url(#ovArrReact)"/>`;
       }
-      const parts=[];
-      if(sp.uy) parts.push(sp.letter+'y');
-      if(sp.ux) parts.push(sp.letter+'x');
-      if(sp.urot) parts.push('M'+sp.letter);
-      svg += `<text x="${px.toFixed(1)}" y="${(y+34).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10.5" font-weight="700" fill="var(--accent)">${parts.join(', ')}</text>`;
+      if(sp.ux){
+        // acima da viga (e não embaixo, junto com Ry/rótulas/cargas) — evita disputar espaço com o que já
+        // lota a faixa de baixo neste tipo de trecho
+        svg += `<line x1="${(px+6).toFixed(1)}" y1="${(y-16).toFixed(1)}" x2="${(px+22).toFixed(1)}" y2="${(y-16).toFixed(1)}" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#ovArrReact)"/>`;
+      }
+      if(sp.urot){
+        const arcY = y+42;
+        svg += `<path d="M ${(px-11).toFixed(1)} ${arcY.toFixed(1)} A 11 11 0 1 1 ${(px+11).toFixed(1)} ${arcY.toFixed(1)}" fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#ovArrReact)"/>`;
+      }
+      const parts=[]; if(sp.uy) parts.push(sp.letter+'y'); if(sp.ux) parts.push(sp.letter+'x'); if(sp.urot) parts.push('M'+sp.letter);
+      const labelY = sp.urot? (y+62) : (y+40);
+      svg += `<text x="${px.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10.5" font-weight="700" fill="var(--accent)">${parts.join(', ')}</text>`;
+      svg += `<circle cx="${px.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4" fill="var(--ink-dim)"/>`;
     });
 
-    // cargas concentradas próprias — valor real, já são dado do problema
+    // cargas concentradas próprias — valor real, já são dado do problema, desenhadas na posição real
+    // (px nunca é deslocado horizontalmente — isso sugeriria uma posição errada na viga). Quando a carga
+    // cai bem em cima de uma rótula (fronteira deste trecho), o braço do vetor é esticado mais longe da
+    // viga do que o normal, deixando a seta e o rótulo numa "pista" separada, verticalmente, da seta e
+    // do rótulo do par ação-reação da rótula — que ficam sempre coladinhos à viga.
+    const edgeMargin = 26;
+    const nearHingeEdge = px => (seg.rightHinge!==null && px > x1-edgeMargin) || (seg.leftHinge!==null && px < x0+edgeMargin);
     seg.ownFy.forEach(p=>{
       const px = toPx(p.x);
-      const sign = p.Fy>=0? -1:1, len=26;
+      const boosted = nearHingeEdge(px);
+      const sign = p.Fy>=0? -1:1, len = boosted? 46:26;
       const yTop = y-(sign>0?len:-len);
       svg += `<line x1="${px.toFixed(1)}" y1="${yTop.toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y-(sign>0?2:-2)).toFixed(1)}" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#ovArrLoad)"/>`;
       svg += `<text x="${px.toFixed(1)}" y="${(yTop-(sign>0?6:-14)).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--v-color)">${fmtNum(p.Fy)} ${uF()}</text>`;
     });
 
-    // momentos aplicados próprios
+    // momentos aplicados próprios (mesmo ajuste de altura perto de uma rótula)
     seg.ownM.forEach(m=>{
       const px = toPx(m.x);
-      svg += `<path d="M ${(px-9).toFixed(1)} ${(y-24).toFixed(1)} A 9 9 0 1 1 ${(px+9).toFixed(1)} ${(y-24).toFixed(1)}" fill="none" stroke="var(--m-color)" stroke-width="2" marker-end="url(#ovArrLoad)"/>`;
-      svg += `<text x="${px.toFixed(1)}" y="${(y-40).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--m-color)">${fmtNum(m.M)} ${uM()}</text>`;
+      const boosted = nearHingeEdge(px);
+      const r = boosted? 18:9, arcY = y-(boosted?38:24), lblY = y-(boosted?56:40);
+      svg += `<path d="M ${(px-r).toFixed(1)} ${arcY.toFixed(1)} A ${r} ${r} 0 1 1 ${(px+r).toFixed(1)} ${arcY.toFixed(1)}" fill="none" stroke="var(--m-color)" stroke-width="2" marker-end="url(#ovArrLoad)"/>`;
+      svg += `<text x="${px.toFixed(1)}" y="${lblY.toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="10" font-weight="700" fill="var(--m-color)">${fmtNum(m.M)} ${uM()}</text>`;
     });
 
     // carga distribuída própria — ainda no formato original (a redução à resultante acontece só na
@@ -2300,11 +2503,12 @@ function segmentFreeBodySVG(seg){
   const spanLen = Math.max(seg.right-seg.left, 1e-6);
   const x0=70, x1=650, y=104;
   const toPx = x => x0 + ((x-seg.left)/spanLen)*(x1-x0);
-  let svg = `<svg viewBox="0 0 720 226" width="100%" height="206" style="max-width:680px;display:block;margin:8px 0;overflow:visible;">`;
+  let svg = `<svg viewBox="0 0 720 226" width="100%" height="206" style="max-width:680px;display:block;margin:8px auto;overflow:visible;">`;
   svg += `<defs>
     <marker id="segArrLoad" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="4.5" refY="4.5" orient="auto"><path d="M0,0.5 L9,4.5 L0,8.5 Z" fill="var(--v-color)"/></marker>
     <marker id="segArrDist" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="var(--m-color)"/></marker>
     <marker id="segArrHinge" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="4.5" refY="4.5" orient="auto"><path d="M0,0.5 L9,4.5 L0,8.5 Z" fill="var(--danger)"/></marker>
+    <marker id="segArrReact" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="4.5" refY="4.5" orient="auto"><path d="M0,0.5 L9,4.5 L0,8.5 Z" fill="var(--accent)"/></marker>
   </defs>`;
   svg += `<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>`;
 
@@ -2345,14 +2549,27 @@ function segmentFreeBodySVG(seg){
     svg += `<text x="${px.toFixed(1)}" y="${(y-46).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--m-color)">${fmtNum(m.M)} ${uM()}</text>`;
   });
 
+  // no lugar do símbolo do apoio, mostra direto a(s) reação(ões) próprias deste trecho como vetores, já
+  // na direção ASSUMIDA como positiva: Ry pra CIMA (por isso desenhada de baixo pra cima, igual à
+  // convenção do DCL final) e Rx pra a DIREITA — a mesma suposição que as equações de equilíbrio abaixo
+  // resolvem: resultado negativo = seta de verdade no sentido oposto.
   seg.ownSupports.forEach(sp=>{
     const px=toPx(sp.x);
-    if(sp.urot){
-      svg += `<rect x="${(px-4).toFixed(1)}" y="${(y-18).toFixed(1)}" width="8" height="36" fill="var(--ink-dim)"/>`;
-    } else {
-      svg += `<path d="M ${px} ${y} L ${(px-11).toFixed(1)} ${y+18} L ${(px+11).toFixed(1)} ${y+18} Z" fill="none" stroke="var(--ink-dim)" stroke-width="2.4" stroke-linejoin="round"/>`;
+    if(sp.uy){
+      svg += `<line x1="${px.toFixed(1)}" y1="${(y+34).toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y+6).toFixed(1)}" stroke="var(--accent)" stroke-width="2.8" marker-end="url(#segArrReact)"/>`;
     }
-    svg += `<text x="${px.toFixed(1)}" y="${(y+40).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--ink-dim)">${sp.letter}</text>`;
+    if(sp.ux){
+      // acima da viga — embaixo já disputa espaço com Ry, rótulas e cargas concentradas deste trecho
+      svg += `<line x1="${(px+8).toFixed(1)}" y1="${(y-20).toFixed(1)}" x2="${(px+30).toFixed(1)}" y2="${(y-20).toFixed(1)}" stroke="var(--accent)" stroke-width="2.4" marker-end="url(#segArrReact)"/>`;
+    }
+    if(sp.urot){
+      const arcY = y+52;
+      svg += `<path d="M ${(px-14).toFixed(1)} ${arcY.toFixed(1)} A 14 14 0 1 1 ${(px+14).toFixed(1)} ${arcY.toFixed(1)}" fill="none" stroke="var(--accent)" stroke-width="2.4" marker-end="url(#segArrReact)"/>`;
+    }
+    const parts=[]; if(sp.uy) parts.push(sp.letter+'y'); if(sp.ux) parts.push(sp.letter+'x'); if(sp.urot) parts.push('M'+sp.letter);
+    const labelY = sp.urot? (y+72) : (y+48);
+    svg += `<text x="${px.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--accent)">${parts.join(', ')}</text>`;
+    svg += `<circle cx="${px.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="var(--ink-dim)"/>`;
   });
 
   [seg.leftHingeMark, seg.rightHingeMark].forEach(hm=>{
@@ -2367,7 +2584,13 @@ function segmentFreeBodySVG(seg){
     const lblY = y-(sign>0?(len+10):-(len+10));
     const lbl = known? `${hm.label}y = ${fmtNum(hm.value)} ${uF()}` : `${hm.label}y = ?`;
     svg += `<text x="${px.toFixed(1)}" y="${lblY.toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--danger)">${lbl}</text>`;
-    svg += `<text x="${px.toFixed(1)}" y="${(y+40).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--danger)">${hm.label}</text>`;
+    // a letra da rótula fica do lado OPOSTO da viga em relação à linha tracejada (que só ocupa um dos lados)
+    // E deslocada horizontalmente pra longe do círculo — assim nunca cai em cima da viga, do círculo ou da
+    // própria linha tracejada
+    const letterAnchor = px > (x0+x1)/2 ? 'end' : 'start';
+    const letterX = px + (letterAnchor==='end'? -13 : 13);
+    const letterY = sign>0? (y+15) : (y-9);
+    svg += `<text x="${letterX.toFixed(1)}" y="${letterY.toFixed(1)}" text-anchor="${letterAnchor}" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="700" fill="var(--danger)">${hm.label}</text>`;
   });
 
   svg += `</svg>`;
@@ -2555,20 +2778,24 @@ function stepsGerber(model, res, actions, sec, extremes){
     seg.ownFy.forEach((p)=> knownFy.push({val:p.Fy, x:p.x, desc:`Carga concentrada própria: ${fmtNum(p.Fy)} ${uF()}`}));
     const knownCouples = seg.ownM.map(m=>({val:m.M, desc:`Momento aplicado próprio: ${fmtNum(Math.abs(m.M))} ${uM()} (${m.M>=0?'anti-horário':'horário'})`}));
 
+    // o desenho do corpo livre (segmentFreeBodySVG) precisa mostrar a força da rótula como incógnita (?)
+    // sempre que for ISSO que este passo vai resolver — só mostra o valor quando ele já veio PRONTO de um
+    // trecho vizinho resolvido antes. Por isso o marcador é montado aqui, ANTES de resolver, e nunca é
+    // sobrescrito com a resposta depois (isso "entregaria" a conta antes das equações, mais abaixo).
     seg.leftHingeMark=null; seg.rightHingeMark=null;
     if(seg.leftHinge!==null){
       const known = !unresolvedHinge.has(seg.leftHinge);
+      seg.leftHingeMark = {x:seg.left, label:hingeLabel(seg.leftHinge), value: known? hingeTransfer[seg.leftHinge] : null};
       if(known){
         const val = hingeTransfer[seg.leftHinge];
-        seg.leftHingeMark = {x:seg.left, label:hingeLabel(seg.leftHinge), value:val};
         knownFy.push({val, x:seg.left, desc:`Força vinda da rótula ${hingeLabel(seg.leftHinge)} (trecho vizinho, já resolvido): ${fmtNum(val)} ${uF()}`});
       }
     }
     if(seg.rightHinge!==null){
       const known = !unresolvedHinge.has(seg.rightHinge);
+      seg.rightHingeMark = {x:seg.right, label:hingeLabel(seg.rightHinge), value: known? hingeTransfer[seg.rightHinge] : null};
       if(known){
         const val = hingeTransfer[seg.rightHinge];
-        seg.rightHingeMark = {x:seg.right, label:hingeLabel(seg.rightHinge), value:val};
         knownFy.push({val, x:seg.right, desc:`Força vinda da rótula ${hingeLabel(seg.rightHinge)} (trecho vizinho, já resolvido): ${fmtNum(val)} ${uF()}`});
       }
     }
@@ -2627,8 +2854,6 @@ function stepsGerber(model, res, actions, sec, extremes){
         const val = solvedValues[u.label];
         hingeTransfer[u.hingeIdx] = -val;
         unresolvedHinge.delete(u.hingeIdx);
-        if(seg.leftHinge===u.hingeIdx) seg.leftHingeMark = {x:seg.left, label:hingeLabel(u.hingeIdx), value:val};
-        if(seg.rightHinge===u.hingeIdx) seg.rightHingeMark = {x:seg.right, label:hingeLabel(u.hingeIdx), value:val};
       }
     });
     seg.transferNote = unknownsForce.filter(u=>u.isHinge).map(u=> `A força vertical transmitida pela rótula ${hingeLabel(u.hingeIdx)} (${u.label} = ${fmtNum(solvedValues[u.label])} ${uF()} aplicada neste trecho) age no trecho vizinho com <strong>mesma intensidade e sentido oposto</strong> (ação e reação): ${u.label} = ${fmtNum(-solvedValues[u.label])} ${uF()}.`).join(' ');
@@ -2640,6 +2865,20 @@ function stepsGerber(model, res, actions, sec, extremes){
   // vigas Gerber em que a ordem "um trecho de cada vez, da esquerda pra direita" não é suficiente: alguns
   // trechos só fecham quando resolvidos em conjunto com o(s) vizinho(s).
   function solveCoupledGroup(group){
+    // mesma regra do solveGerberSegment: o desenho do corpo livre mostra a rótula como incógnita (?)
+    // quando ela faz parte do que ESTE sistema acoplado vai resolver, e com o valor só quando ela já
+    // veio pronta de um trecho de fora do grupo, resolvido antes — nunca a resposta antes das contas.
+    group.forEach(seg=>{
+      seg.leftHingeMark=null; seg.rightHingeMark=null;
+      if(seg.leftHinge!==null){
+        const known = !unresolvedHinge.has(seg.leftHinge);
+        seg.leftHingeMark = {x:seg.left, label:hingeLabel(seg.leftHinge), value: known? hingeTransfer[seg.leftHinge] : null};
+      }
+      if(seg.rightHinge!==null){
+        const known = !unresolvedHinge.has(seg.rightHinge);
+        seg.rightHingeMark = {x:seg.right, label:hingeLabel(seg.rightHinge), value: known? hingeTransfer[seg.rightHinge] : null};
+      }
+    });
     const unknowns=[];
     group.forEach(seg=>{
       seg.ownSupports.forEach(sp=>{
@@ -2691,13 +2930,6 @@ function stepsGerber(model, res, actions, sec, extremes){
       const ownUnk = unknowns.filter(u=>u.seg===seg);
       const hingeUnk = unknowns.filter(u=>u.isHinge && (seg.leftHinge===u.hingeIdx || seg.rightHinge===u.hingeIdx));
       const otherIdxs = group.filter(s=>s!==seg).map(s=>'Trecho '+s.idx);
-
-      // marca as rótulas deste trecho com o valor no sentido que este trecho usa
-      hingeUnk.forEach(u=>{
-        const val = seg.rightHinge===u.hingeIdx? solvedValues[u.label] : -solvedValues[u.label];
-        if(seg.leftHinge===u.hingeIdx) seg.leftHingeMark={x:seg.left, label:u.label.replace('y',''), value:val};
-        if(seg.rightHinge===u.hingeIdx) seg.rightHingeMark={x:seg.right, label:u.label.replace('y',''), value:val};
-      });
 
       // reconstrói os termos das duas equações (ΣFy=0, ΣM em torno de x=seg.left =0) já com os valores
       const fyTerms=[], mTerms=[];
@@ -2795,7 +3027,7 @@ function stepsGerber(model, res, actions, sec, extremes){
     <div class="eq">Ordem de resolução: ${orderHTML}</div>
   </div>
   <div class="substep"><h4>Divisão da viga em corpos livres</h4>
-    <p>Antes de resolver cada trecho numericamente, veja a viga já "explodida" nos seus ${segments.length} corpo(s) livre(s), lado a lado: os apoios próprios aparecem só com a letra da reação (ainda incógnita) e, em cada corte de rótula, o par ação-reação simbólico — sem prima de um lado, com prima do outro, em sentidos opostos, exatamente como manda a 3ª lei de Newton.</p>
+    <p>Antes de resolver cada trecho numericamente, veja a viga já "explodida" nos seus ${segments.length} corpo(s) livre(s), lado a lado:</p>
     ${gerberSplitOverviewSVG(segments, hingeLabel)}
   </div>`;
 
@@ -2841,7 +3073,7 @@ function stepsGerber(model, res, actions, sec, extremes){
 }
 
 function gIconSupports(){
-  return `<svg viewBox="0 0 300 68" width="100%" height="62" style="max-width:280px;display:block;margin:4px 0 8px;">
+  return `<svg viewBox="0 0 300 68" width="100%" height="62" style="max-width:280px;display:block;margin:4px auto 8px;">
     <g>
       <line x1="20" y1="34" x2="80" y2="34" stroke="var(--ink-dim)" stroke-width="2"/>
       <path d="M50 34 L38 52 L62 52 Z" fill="none" stroke="var(--ink-dim)" stroke-width="1.5"/>
@@ -2862,6 +3094,9 @@ function gIconSupports(){
     </g>
   </svg>`;
 }
+// Par de "olhinhos" nos dois lados de uma marca de seção (linha azul), lembrando o aluno de que o corte
+// pode ser olhado tanto pela esquerda quanto pela direita — o resultado (N, V ou M) é o mesmo dos dois
+// lados. cx/cy é o centro da marca de seção; gap é a distância de cada olho até o centro.
 let _gIconSeq=0;
 function gIconMomento(){
   const id='gArrM'+(_gIconSeq++);
@@ -2872,18 +3107,22 @@ function gIconMomento(){
 }
 function gIconNormal(){
   const id='gArrN'+(_gIconSeq++);
-  return `<svg viewBox="0 0 260 58" width="100%" height="52" style="max-width:240px;display:block;margin:4px 0 8px;">
+  return `<svg viewBox="0 0 260 68" width="100%" height="120" style="max-width:480px;display:block;margin:4px auto 8px;">
     <g>
       <rect x="40" y="22" width="40" height="12" fill="none" stroke="var(--n-color)" stroke-width="1.6"/>
       <line x1="38" y1="28" x2="10" y2="28" stroke="var(--n-color)" stroke-width="2" marker-end="url(#${id})"/>
       <line x1="82" y1="28" x2="110" y2="28" stroke="var(--n-color)" stroke-width="2" marker-end="url(#${id})"/>
-      <text x="60" y="50" text-anchor="middle" font-size="9" fill="var(--n-color)">tração (positivo)</text>
+      <line x1="60" y1="16" x2="60" y2="40" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="60" y="12" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
+      <text x="60" y="60" text-anchor="middle" font-size="9" fill="var(--n-color)">tração (positivo)</text>
     </g>
     <g transform="translate(140,0)">
       <rect x="40" y="22" width="40" height="12" fill="none" stroke="var(--n-color)" stroke-width="1.6"/>
       <line x1="10" y1="28" x2="38" y2="28" stroke="var(--n-color)" stroke-width="2" marker-end="url(#${id})"/>
       <line x1="110" y1="28" x2="82" y2="28" stroke="var(--n-color)" stroke-width="2" marker-end="url(#${id})"/>
-      <text x="60" y="50" text-anchor="middle" font-size="9" fill="var(--n-color)">compressão (negativo)</text>
+      <line x1="60" y1="16" x2="60" y2="40" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="60" y="12" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
+      <text x="60" y="60" text-anchor="middle" font-size="9" fill="var(--n-color)">compressão (negativo)</text>
     </g>
     <defs><marker id="${id}" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="var(--n-color)"/></marker></defs>
   </svg>`;
@@ -2891,23 +3130,30 @@ function gIconNormal(){
 function gIconCortante(){
   const id='gArrV'+(_gIconSeq++);
   const idClock='gArrClock'+(_gIconSeq++);
-  return `<svg viewBox="0 0 320 90" width="100%" height="80" style="max-width:320px;display:block;margin:4px 0 8px;">
-    <line x1="20" y1="45" x2="200" y2="45" stroke="var(--ink-dim)" stroke-width="2"/>
-    <line x1="110" y1="14" x2="110" y2="76" stroke="var(--ink-dim)" stroke-width="1" stroke-dasharray="3,3"/>
-    <line x1="95" y1="45" x2="95" y2="72" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
-    <line x1="125" y1="45" x2="125" y2="18" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
-    <text x="110" y="88" text-anchor="middle" font-size="9" fill="var(--v-color)">positivo → gira no sentido horário</text>
-    <!-- "reloginho" mostrando o sentido horário, pra reforçar a mnemônica de forma visual -->
-    <circle cx="266" cy="38" r="22" fill="var(--surface)" stroke="var(--v-color)" stroke-width="2"/>
-    <line x1="266" y1="20" x2="266" y2="25" stroke="var(--v-color)" stroke-width="1.6"/>
-    <line x1="266" y1="51" x2="266" y2="56" stroke="var(--v-color)" stroke-width="1.6"/>
-    <line x1="248" y1="38" x2="253" y2="38" stroke="var(--v-color)" stroke-width="1.6"/>
-    <line x1="279" y1="38" x2="284" y2="38" stroke="var(--v-color)" stroke-width="1.6"/>
-    <line x1="266" y1="38" x2="266" y2="23" stroke="var(--v-color)" stroke-width="2.2" stroke-linecap="round"/>
-    <line x1="266" y1="38" x2="279" y2="28" stroke="var(--v-color)" stroke-width="2.2" stroke-linecap="round"/>
-    <circle cx="266" cy="38" r="1.8" fill="var(--v-color)"/>
-    <path d="M 266 10 A 28 28 0 0 1 294 38" fill="none" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${idClock})"/>
-    <text x="266" y="80" text-anchor="middle" font-size="9" fill="var(--v-color)">sentido horário</text>
+  // "reloginho": em vez de ponteiros de hora/minuto (que não têm nada a ver com cortante), o centro do
+  // relógio mostra o MESMO motivo do desenho à esquerda em miniatura — um corte na viga com um vetor de
+  // cada lado — pra reforçar visualmente que o sentido horário/anti-horário se refere ao giro desse par
+  // de vetores, não a um relógio de verdade. A seta curva por fora do círculo reforça o sentido geral.
+  const ccx=298, ccy=52, cr=34;
+  return `<svg viewBox="0 0 380 112" width="100%" height="192" style="max-width:760px;display:block;margin:4px auto 8px;">
+    <line x1="20" y1="52" x2="200" y2="52" stroke="var(--ink-dim)" stroke-width="2"/>
+    <line x1="110" y1="18" x2="110" y2="86" stroke="var(--accent)" stroke-width="2.2"/>
+    <text x="110" y="10" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
+    <line x1="95" y1="52" x2="95" y2="80" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
+    <line x1="125" y1="52" x2="125" y2="24" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
+    <text x="110" y="100" text-anchor="middle" font-size="9" fill="var(--v-color)">positivo → gira no sentido horário</text>
+    <circle cx="${ccx}" cy="${ccy}" r="${cr}" fill="var(--surface)" stroke="var(--v-color)" stroke-width="2.2"/>
+    <line x1="${ccx}" y1="${ccy-cr+4}" x2="${ccx}" y2="${ccy-cr+9}" stroke="var(--v-color)" stroke-width="1.6"/>
+    <line x1="${ccx}" y1="${ccy+cr-4}" x2="${ccx}" y2="${ccy+cr-9}" stroke="var(--v-color)" stroke-width="1.6"/>
+    <line x1="${ccx-cr+4}" y1="${ccy}" x2="${ccx-cr+9}" y2="${ccy}" stroke="var(--v-color)" stroke-width="1.6"/>
+    <line x1="${ccx+cr-4}" y1="${ccy}" x2="${ccx+cr-9}" y2="${ccy}" stroke="var(--v-color)" stroke-width="1.6"/>
+    <!-- miniatura do corte com os dois vetores, igual à ilustração da esquerda -->
+    <line x1="${ccx-17}" y1="${ccy}" x2="${ccx+17}" y2="${ccy}" stroke="var(--ink-dim)" stroke-width="2"/>
+    <line x1="${ccx}" y1="${ccy-16}" x2="${ccx}" y2="${ccy+16}" stroke="var(--accent)" stroke-width="2.6"/>
+    <line x1="${ccx-9}" y1="${ccy}" x2="${ccx-9}" y2="${ccy+15}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
+    <line x1="${ccx+9}" y1="${ccy}" x2="${ccx+9}" y2="${ccy-15}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
+    <path d="M ${ccx} ${ccy-cr-6} A ${cr+6} ${cr+6} 0 0 1 ${ccx+cr+6} ${ccy}" fill="none" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${idClock})"/>
+    <text x="${ccx}" y="${ccy+cr+20}" text-anchor="middle" font-size="9" fill="var(--v-color)">sentido horário</text>
     <defs>
       <marker id="${id}" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="var(--v-color)"/></marker>
       <marker id="${idClock}" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="var(--v-color)"/></marker>
@@ -2915,15 +3161,19 @@ function gIconCortante(){
   </svg>`;
 }
 function gIconMomentoFletor(){
-  return `<svg viewBox="0 0 260 124" width="100%" height="108" style="max-width:280px;display:block;margin:4px 0 8px;">
+  return `<svg viewBox="0 0 260 124" width="100%" height="216" style="max-width:560px;display:block;margin:4px auto 8px;">
     <g>
       <circle cx="34" cy="22" r="2.8" fill="var(--m-color)"/><circle cx="86" cy="22" r="2.8" fill="var(--m-color)"/>
       <path d="M18 32 Q60 58 102 32" fill="none" stroke="var(--m-color)" stroke-width="2.4" stroke-linecap="round"/>
+      <line x1="60" y1="30" x2="60" y2="54" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="60" y="8" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
       <text x="60" y="76" text-anchor="middle" font-size="9" fill="var(--m-color)">M positivo: tração embaixo</text>
     </g>
     <g transform="translate(140,0)">
       <circle cx="34" cy="14" r="2.8" fill="var(--m-color)"/><circle cx="86" cy="14" r="2.8" fill="var(--m-color)"/>
       <path d="M18 46 Q60 22 102 46" fill="none" stroke="var(--m-color)" stroke-width="2.4" stroke-linecap="round"/>
+      <line x1="60" y1="18" x2="60" y2="42" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="60" y="8" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
       <text x="60" y="76" text-anchor="middle" font-size="9" fill="var(--m-color)">M negativo: tração em cima</text>
     </g>
     <text x="130" y="96" text-anchor="middle" font-size="9" font-weight="700" fill="var(--m-color)">Se tem sorriso, é positivo.</text>
@@ -2937,7 +3187,7 @@ function gIconRotula(){
   </svg>`;
 }
 function gIconEstaticidade(){
-  return `<svg viewBox="0 0 280 62" width="100%" height="56" style="max-width:260px;display:block;margin:4px 0 8px;">
+  return `<svg viewBox="0 0 280 62" width="100%" height="56" style="max-width:260px;display:block;margin:4px auto 8px;">
     <g>
       <line x1="20" y1="26" x2="110" y2="26" stroke="var(--ink-dim)" stroke-width="2"/>
       <path d="M30 26 L22 38 L38 38 Z" fill="none" stroke="var(--ink-dim)" stroke-width="1.3"/>
@@ -3043,7 +3293,8 @@ function renderResultsBody(data){
   const dclWrap=document.createElement('div');
   dclWrap.innerHTML = `<h3 style="font-size:0.8rem;margin:18px 0 8px;">Diagrama de Corpo Livre (DCL)</h3>
     <p class="hint" style="margin-top:-4px;">A viga isolada, com todas as cargas aplicadas e todas as reações de apoio já calculadas:</p>
-    ${freeBodyDiagramSVG(model, res)}`;
+    ${freeBodyDiagramSVG(model, res)}
+    ${diagramCotaSVG(model.nodes[model.nodes.length-1].x)}`;
   body.appendChild(dclWrap);
 
   const diagramsHeading=document.createElement('h3'); diagramsHeading.style.cssText='font-size:0.8rem;margin:18px 0 8px;'; diagramsHeading.textContent='Diagramas de esforços';
@@ -3124,19 +3375,23 @@ document.getElementById('resetBtn').addEventListener('click', ()=>{
 });
 
 function triggerPdfExport(){
-  document.querySelectorAll('#resultsBody details').forEach(d=>{ d.open=true; });
+  // abre só os passos da resolução (details.step) — o glossário (details.gterm) já fica escondido na
+  // impressão via CSS (body.printing-results .glossary), então não há motivo pra também forçar cada
+  // termo dele a abrir: isso só deixava todos os conceitos expandidos na TELA depois de imprimir.
+  document.querySelectorAll('#resultsBody details:not(.gterm)').forEach(d=>{ d.open=true; });
 
   // Injeta, só para a impressão, um retrato estático do enunciado (a viga tal como foi montada no
-  // editor) no topo dos resultados — sem isso o PDF ia direto para reações/diagramas, sem mostrar
-  // o exercício que os gerou. É removido logo após a impressão, sem afetar a tela normal.
-  const resultsBody = document.getElementById('resultsBody');
+  // editor) ANTES de tudo — inclusive antes do título "Resultados" — sem isso o PDF ia direto para
+  // reações/diagramas, sem mostrar o exercício que os gerou. É removido logo após a impressão, sem
+  // afetar a tela normal.
+  const resultsPanel = document.getElementById('resultsPanel');
   const exerciseWrap = document.createElement('div');
   exerciseWrap.id = 'printExerciseBlock';
   const exerciseSvg = document.getElementById('beamSvg').cloneNode(true);
   exerciseSvg.removeAttribute('class');
   exerciseWrap.innerHTML = `<h3 style="font-size:0.8rem;margin:0 0 8px;">Enunciado — viga montada</h3>`;
   exerciseWrap.appendChild(exerciseSvg);
-  resultsBody.insertBefore(exerciseWrap, resultsBody.firstChild);
+  resultsPanel.insertBefore(exerciseWrap, resultsPanel.firstChild);
 
   document.body.classList.add('printing-results');
   setTimeout(()=>{
