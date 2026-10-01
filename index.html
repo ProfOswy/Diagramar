@@ -736,17 +736,75 @@ function renderBeamEditor(){
   const cssBorder = getComputedStyle(document.documentElement).getPropertyValue('--border-strong').trim();
   const cssAccent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
 
-  svg.appendChild(el('rect',{x:0,y:0,width:1000,height:260,fill:'transparent',id:'clickTarget'}));
+  const clickRect = el('rect',{x:0,y:0,width:1000,height:260,fill:'transparent',id:'clickTarget'});
+  svg.appendChild(clickRect);
 
-  const g_ruler=el('g',{});
-  const nticks=Math.min(20,Math.max(4,Math.round(state.L)));
-  const RULER_Y = EDIT_Y+92;
-  for(let i=0;i<=nticks;i++){
-    const x=state.L*i/nticks, px=xToPx(x);
-    g_ruler.appendChild(el('line',{x1:px,y1:RULER_Y,x2:px,y2:RULER_Y+7,stroke:cssBorder,'stroke-width':1.8,'stroke-linecap':'round'}));
-    g_ruler.appendChild(textEl(px, RULER_Y+24, fmtNum(x,1), {fill:cssDim,'text-anchor':'middle','font-size':'13','font-weight':'400'}));
+  // ACIMA DA VIGA: cota geral e cota individual, cada uma numa pista própria reservada no topo do canvas
+  // (acima de onde cargas/momentos já desenham) e separadas entre si por um espaço em branco — evita
+  // ficar tumultuado perto dos desenhos de carga. A régua de 1 em 1 continua embaixo da viga, como antes.
+  const g_aboveBeam=el('g',{});
+  const rowGapEd=18, blankGapEd=26;
+  const landmarksXEd = [
+    ...state.supports.map(s=>s.x),
+    ...state.hinges.map(h=>h.x),
+    ...state.pointLoads.map(p=>p.x),
+    ...state.moments.map(m=>m.x),
+    ...state.distLoads.flatMap(d=>[d.x1,d.x2]),
+  ];
+  const xsEd = Array.from(new Set([0, state.L, ...landmarksXEd.map(x=>round2(clamp(x,0,state.L)))])).sort((a,b)=>a-b);
+  let maxRowEd=-1, segsEd=[], pxToRowEd={};
+  if(xsEd.length>2){
+    const pxsEd = xsEd.map(xToPx);
+    for(let i=0;i<pxsEd.length-1;i++){
+      if(pxsEd[i+1]-pxsEd[i] < 1e-6) continue;
+      const label = fmtNum(xsEd[i+1]-xsEd[i],2)+' '+uL();
+      segsEd.push({segPx0:pxsEd[i], segPx1:pxsEd[i+1], label, half: label.length*3.4+6});
+    }
+    const levelEndsEd=[];
+    segsEd.forEach(s=>{
+      const mid=(s.segPx0+s.segPx1)/2;
+      let lvl=0;
+      while(levelEndsEd[lvl]!==undefined && mid-s.half < levelEndsEd[lvl]+4) lvl++;
+      levelEndsEd[lvl]=mid+s.half;
+      s.row=lvl;
+    });
+    maxRowEd = segsEd.reduce((m,s)=>Math.max(m,s.row),0);
+    segsEd.forEach(s=>{
+      [s.segPx0,s.segPx1].forEach(px=>{
+        const k=px.toFixed(1);
+        pxToRowEd[k]=pxToRowEd[k]===undefined? s.row : Math.max(pxToRowEd[k], s.row);
+      });
+    });
   }
-  svg.appendChild(g_ruler);
+  // cota individual: pista 0 fica mais perto da cota geral (que vem acima dela), pistas extras sobem mais
+  const indivCloseCy = -16;
+  if(maxRowEd>=0){
+    Object.keys(pxToRowEd).forEach(k=>{
+      const px=+k, yTop = indivCloseCy - pxToRowEd[k]*rowGapEd - 6;
+      g_aboveBeam.appendChild(el('line',{x1:px,y1:yTop,x2:px,y2:indivCloseCy+6,stroke:cssBorder,'stroke-width':1}));
+    });
+    segsEd.forEach(s=>{
+      const cy = indivCloseCy - s.row*rowGapEd;
+      const mid=(s.segPx0+s.segPx1)/2;
+      g_aboveBeam.appendChild(el('line',{x1:s.segPx0,y1:cy,x2:s.segPx1,y2:cy,stroke:cssDim,'stroke-width':1}));
+      g_aboveBeam.appendChild(el('line',{x1:s.segPx0-4,y1:cy+4,x2:s.segPx0+4,y2:cy-4,stroke:cssDim,'stroke-width':1.2}));
+      g_aboveBeam.appendChild(el('line',{x1:s.segPx1-4,y1:cy+4,x2:s.segPx1+4,y2:cy-4,stroke:cssDim,'stroke-width':1.2}));
+      g_aboveBeam.appendChild(el('rect',{x:mid-s.half,y:cy-16,width:s.half*2,height:14,fill:'var(--surface-2)'}));
+      g_aboveBeam.appendChild(textEl(mid, cy-5, s.label, {fill:cssDim,'text-anchor':'middle','font-size':'11','font-weight':'400'}));
+    });
+  }
+  // cota geral: separada da individual por um espaço em branco, mais longe da viga que tudo o resto
+  const topOfIndiv = maxRowEd>=0? (indivCloseCy - maxRowEd*rowGapEd) : indivCloseCy;
+  const generalCy = topOfIndiv - blankGapEd - 8;
+  g_aboveBeam.appendChild(el('line',{x1:EDIT_X0,y1:generalCy-14,x2:EDIT_X0,y2:generalCy+4,stroke:cssBorder,'stroke-width':1}));
+  g_aboveBeam.appendChild(el('line',{x1:EDIT_X1,y1:generalCy-14,x2:EDIT_X1,y2:generalCy+4,stroke:cssBorder,'stroke-width':1}));
+  g_aboveBeam.appendChild(el('line',{x1:EDIT_X0,y1:generalCy,x2:EDIT_X1,y2:generalCy,stroke:cssDim,'stroke-width':1}));
+  [EDIT_X0,EDIT_X1].forEach(px=>{ g_aboveBeam.appendChild(el('line',{x1:px-5,y1:generalCy+5,x2:px+5,y2:generalCy-5,stroke:cssDim,'stroke-width':1.4})); });
+  g_aboveBeam.appendChild(el('rect',{x:(EDIT_X0+EDIT_X1)/2-38,y:generalCy-19,width:76,height:15,fill:'var(--surface-2)'}));
+  g_aboveBeam.appendChild(textEl((EDIT_X0+EDIT_X1)/2, generalCy-7, 'L = '+fmtNum(state.L,2)+' '+uL(), {fill:cssDim,'text-anchor':'middle','font-size':'13','font-weight':'700'}));
+  svg.appendChild(g_aboveBeam);
+  const topMargin = Math.max(0, -(generalCy-18));
+
   svg.appendChild(el('line',{x1:EDIT_X0,y1:EDIT_Y,x2:EDIT_X1,y2:EDIT_Y,stroke:cssInk,'stroke-width':8,'stroke-linecap':'round',filter:'url(#sketchWobble)'}));
 
   state.distLoads.forEach(d=>{
@@ -854,7 +912,7 @@ function renderBeamEditor(){
       stem = {x1:px, y1:stemY, x2:px, y2:EDIT_Y-beamHalf};
       labelX = tailX; labelY = tailY-10;
     } else {
-      tipY = EDIT_Y - Math.sign(dy)*beamHalf;
+      tipY = EDIT_Y - Math.sign(dy)*(beamHalf+13); // seta "flutuante": ponta claramente afastada da viga, não encostando
       tipX = px;
       tailX = px-dx; tailY = tipY-dy;
       labelX = tailX; labelY = tailY-10*Math.sign(dy);
@@ -906,15 +964,21 @@ function renderBeamEditor(){
     svg.appendChild(textEl(px, EDIT_Y-46, 'início: '+fmtNum(pendingDistStart,2), {fill:cssAccent,'text-anchor':'middle'}));
   }
 
-  const cotaY = 26;
-  const g_cota = el('g',{});
-  g_cota.appendChild(el('line',{x1:EDIT_X0,y1:16,x2:EDIT_X0,y2:cotaY+4,stroke:cssDim,'stroke-width':1}));
-  g_cota.appendChild(el('line',{x1:EDIT_X1,y1:16,x2:EDIT_X1,y2:cotaY+4,stroke:cssDim,'stroke-width':1}));
-  g_cota.appendChild(el('line',{x1:EDIT_X0,y1:cotaY,x2:EDIT_X1,y2:cotaY,stroke:cssDim,'stroke-width':1}));
-  [EDIT_X0,EDIT_X1].forEach(px=>{ g_cota.appendChild(el('line',{x1:px-5,y1:cotaY+5,x2:px+5,y2:cotaY-5,stroke:cssDim,'stroke-width':1.4})); });
-  g_cota.appendChild(el('rect',{x:(EDIT_X0+EDIT_X1)/2-38,y:cotaY-19,width:76,height:15,fill:'var(--surface-2)'}));
-  g_cota.appendChild(textEl((EDIT_X0+EDIT_X1)/2, cotaY-7, 'L = '+fmtNum(state.L,2)+' '+uL(), {fill:cssDim,'text-anchor':'middle','font-size':'13','font-weight':'400'}));
-  svg.appendChild(g_cota);
+  // RÉGUA DE 1 EM 1 — escala fixa, embaixo da viga
+  const g_ruler=el('g',{});
+  const rulerY = EDIT_Y+95;
+  const nticks=Math.min(20,Math.max(4,Math.round(state.L)));
+  for(let i=0;i<=nticks;i++){
+    const x=state.L*i/nticks, px=xToPx(x);
+    g_ruler.appendChild(el('line',{x1:px,y1:rulerY,x2:px,y2:rulerY+7,stroke:cssBorder,'stroke-width':1.8,'stroke-linecap':'round'}));
+    g_ruler.appendChild(textEl(px, rulerY+24, fmtNum(x,1), {fill:cssDim,'text-anchor':'middle','font-size':'13','font-weight':'400'}));
+  }
+  svg.appendChild(g_ruler);
+
+  const neededEditorH = Math.max(260, rulerY+34) + topMargin;
+  svg.setAttribute('viewBox', `0 ${-topMargin} 1000 ${neededEditorH}`);
+  clickRect.setAttribute('y', -topMargin);
+  clickRect.setAttribute('height', neededEditorH);
 
   attachSvgEvents(svg);
 }
@@ -1496,7 +1560,7 @@ function freeBodyDiagramSVG(model, res){
       svg += `<line x1="${px.toFixed(1)}" y1="${armY.toFixed(1)}" x2="${px.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--v-color)" stroke-width="1.6" stroke-dasharray="2,4"/>`;
       svg += `<text x="${(px-dx).toFixed(1)}" y="${(armY-14).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="15" font-weight="700" fill="var(--v-color)">${fmtNum(p.mag,1)} ${uF()}</text>`;
     } else {
-      svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--v-color)" stroke-width="3.6" marker-end="url(#dclArrLoad)"/>`;
+      svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y-Math.sign(dy)*14).toFixed(1)}" stroke="var(--v-color)" stroke-width="3.6" marker-end="url(#dclArrLoad)"/>`;
       svg += `<text x="${(px-dx).toFixed(1)}" y="${(y-dy-14).toFixed(1)}" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="15" font-weight="700" fill="var(--v-color)">${fmtNum(p.mag,1)} ${uF()}</text>`;
     }
   });
@@ -1573,18 +1637,87 @@ function freeBodyDiagramSVG(model, res){
   return svg;
 }
 
-function diagramCotaSVG(L){
+function diagramCotaSVG(L, landmarks){
   // cota fina de projeto, igual à do editor principal, alinhada com o eixo x dos diagramas (padL=70, padR=70 em viewBox 1000)
-  const x0=70, x1=930, cotaY=24;
-  return `<svg viewBox="0 0 1000 44" width="100%" height="38" style="display:block;margin:2px 0 10px;">
-    <line x1="${x0}" y1="12" x2="${x0}" y2="${cotaY+4}" stroke="var(--ink-dim)" stroke-width="1"/>
-    <line x1="${x1}" y1="12" x2="${x1}" y2="${cotaY+4}" stroke="var(--ink-dim)" stroke-width="1"/>
-    <line x1="${x0}" y1="${cotaY}" x2="${x1}" y2="${cotaY}" stroke="var(--ink-dim)" stroke-width="1"/>
-    <line x1="${x0-5}" y1="${cotaY+5}" x2="${x0+5}" y2="${cotaY-5}" stroke="var(--ink-dim)" stroke-width="1.4"/>
-    <line x1="${x1-5}" y1="${cotaY+5}" x2="${x1+5}" y2="${cotaY-5}" stroke="var(--ink-dim)" stroke-width="1.4"/>
-    <rect x="${(x0+x1)/2-38}" y="${cotaY-19}" width="76" height="15" fill="var(--surface)"/>
-    <text x="${(x0+x1)/2}" y="${cotaY-7}" fill="var(--ink-dim)" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="12">L = ${fmtNum(L,2)} ${uL()}</text>
-  </svg>`;
+  const x0=70, x1=930;
+  const toPxLocal = x => x0 + (clamp(x,0,L)/(L||1e-6))*(x1-x0);
+  const singleSpanSVG = (cotaY)=> `
+      <line x1="${x0}" y1="12" x2="${x0}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>
+      <line x1="${x1}" y1="12" x2="${x1}" y2="${(cotaY+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>
+      <line x1="${x0}" y1="${cotaY.toFixed(1)}" x2="${x1}" y2="${cotaY.toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>
+      <line x1="${x0-5}" y1="${(cotaY+5).toFixed(1)}" x2="${x0+5}" y2="${(cotaY-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.4"/>
+      <line x1="${x1-5}" y1="${(cotaY+5).toFixed(1)}" x2="${x1+5}" y2="${(cotaY-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.4"/>
+      <rect x="${(x0+x1)/2-38}" y="${(cotaY-19).toFixed(1)}" width="76" height="15" fill="var(--surface)"/>
+      <text x="${(x0+x1)/2}" y="${(cotaY-7).toFixed(1)}" fill="var(--ink-dim)" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="12">L = ${fmtNum(L,2)} ${uL()}</text>`;
+  if(!landmarks || landmarks.length<1){
+    // sem marcos (ex.: a cota-régua ao lado dos diagramas N/V/M) — só o vão inteiro, como antes
+    const cotaY=24;
+    return `<svg viewBox="0 0 1000 44" width="100%" height="38" style="display:block;margin:2px 0 10px;">${singleSpanSVG(cotaY)}</svg>`;
+  }
+  // cotagem em cadeia: um segmento de cota entre CADA par de marcos consecutivos (apoios, rótulas, cargas
+  // concentradas, momentos, início/fim de cargas distribuídas) — mostra a posição de cada elemento, não só
+  // o vão total. Quando dois marcos ficam perto demais pro rótulo caber no próprio segmento, o rótulo
+  // (e a linha de cota daquele trecho) desce pra uma "pista" mais baixa, igual ao esquema já usado nos
+  // outros desenhos da ferramenta pra evitar sobreposição. A cota do vão inteiro (geral) fica numa pista
+  // própria, por baixo de todas as individuais — convenção usual de desenho técnico: cotas de detalhe
+  // perto da peça, cota geral por fora de tudo.
+  const xs = Array.from(new Set(landmarks.map(x=>round2(clamp(x,0,L))))).sort((a,b)=>a-b);
+  if(xs[0]>1e-6) xs.unshift(0);
+  if(L-xs[xs.length-1]>1e-6) xs.push(round2(L));
+  if(xs.length<=2){
+    // nenhum marco interno de fato (só as duas pontas) — cota geral sozinha, como no caso sem landmarks
+    const cotaY=24;
+    return `<svg viewBox="0 0 1000 44" width="100%" height="38" style="display:block;margin:2px 0 10px;">${singleSpanSVG(cotaY)}</svg>`;
+  }
+  const pxs = xs.map(toPxLocal);
+  const segs=[];
+  for(let i=0;i<pxs.length-1;i++){
+    if(pxs[i+1]-pxs[i] < 1e-6) continue;
+    const label = fmtNum(xs[i+1]-xs[i],2)+' '+uL();
+    segs.push({ segPx0:pxs[i], segPx1:pxs[i+1], label, half: label.length*3.4+6 });
+  }
+  const levelEnds=[];
+  segs.forEach(s=>{
+    const mid=(s.segPx0+s.segPx1)/2;
+    let lvl=0;
+    while(levelEnds[lvl]!==undefined && mid-s.half < levelEnds[lvl]+4) lvl++;
+    levelEnds[lvl]=mid+s.half;
+    s.row=lvl;
+  });
+  const maxRow = segs.reduce((m,s)=>Math.max(m,s.row),0);
+  const rowGap=22, baseCotaY=24;
+  const generalCy = baseCotaY + (maxRow+1)*rowGap + 22;
+  const pxToRow={};
+  segs.forEach(s=>{
+    [s.segPx0, s.segPx1].forEach(px=>{
+      const k=px.toFixed(1);
+      pxToRow[k] = pxToRow[k]===undefined? s.row : Math.max(pxToRow[k], s.row);
+    });
+  });
+  let body='';
+  Object.keys(pxToRow).forEach(k=>{
+    const px=+k, yBottom = baseCotaY + pxToRow[k]*rowGap + 4;
+    body += `<line x1="${px.toFixed(1)}" y1="12" x2="${px.toFixed(1)}" y2="${yBottom.toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  });
+  segs.forEach(s=>{
+    const cy = baseCotaY + s.row*rowGap;
+    const mid=(s.segPx0+s.segPx1)/2;
+    body += `<line x1="${s.segPx0.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${s.segPx1.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+    body += `<line x1="${(s.segPx0-4).toFixed(1)}" y1="${(cy+4).toFixed(1)}" x2="${(s.segPx0+4).toFixed(1)}" y2="${(cy-4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.2"/>`;
+    body += `<line x1="${(s.segPx1-4).toFixed(1)}" y1="${(cy+4).toFixed(1)}" x2="${(s.segPx1+4).toFixed(1)}" y2="${(cy-4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.2"/>`;
+    body += `<rect x="${(mid-s.half).toFixed(1)}" y="${(cy-18).toFixed(1)}" width="${(s.half*2).toFixed(1)}" height="15" fill="var(--surface)"/>`;
+    body += `<text x="${mid.toFixed(1)}" y="${(cy-6).toFixed(1)}" fill="var(--ink-dim)" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="11">${s.label}</text>`;
+  });
+  // cota geral (vão total), numa pista própria por baixo de todas as individuais
+  body += `<line x1="${x0}" y1="12" x2="${x0}" y2="${(generalCy+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  body += `<line x1="${x1}" y1="12" x2="${x1}" y2="${(generalCy+4).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1"/>`;
+  body += `<line x1="${x0}" y1="${generalCy.toFixed(1)}" x2="${x1}" y2="${generalCy.toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.3"/>`;
+  body += `<line x1="${(x0-5).toFixed(1)}" y1="${(generalCy+5).toFixed(1)}" x2="${(x0+5).toFixed(1)}" y2="${(generalCy-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.6"/>`;
+  body += `<line x1="${(x1-5).toFixed(1)}" y1="${(generalCy+5).toFixed(1)}" x2="${(x1+5).toFixed(1)}" y2="${(generalCy-5).toFixed(1)}" stroke="var(--ink-dim)" stroke-width="1.6"/>`;
+  body += `<rect x="${((x0+x1)/2-40).toFixed(1)}" y="${(generalCy-19).toFixed(1)}" width="80" height="15" fill="var(--surface)"/>`;
+  body += `<text x="${((x0+x1)/2).toFixed(1)}" y="${(generalCy-7).toFixed(1)}" fill="var(--ink-dim)" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-size="12" font-weight="700">L = ${fmtNum(L,2)} ${uL()}</text>`;
+  const viewH = generalCy + 20;
+  return `<svg viewBox="0 0 1000 ${viewH}" width="100%" height="${Math.round(38*viewH/44)}" style="display:block;margin:2px 0 10px;overflow:visible;">${body}</svg>`;
 }
 
 const SIGN_LABELS = {
@@ -1745,7 +1878,7 @@ function sectionCutDiagramSVG(model, cuts){
     const px=toPx(p.x);
     const r=toRad(p.angleDeg), len=20;
     const dx=Math.cos(r)*len, dy=-Math.sin(r)*len;
-    svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${y}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#arrSecLoad)"/>`;
+    svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y-Math.sign(dy)*8).toFixed(1)}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#arrSecLoad)"/>`;
   });
   state.distLoads.forEach(d=>{
     const nd=normDist(d);
@@ -2151,7 +2284,7 @@ function concentratedDistContextSVG(model, d, R, xbar){
     const px=toPx(p.x);
     const r=toRad(p.angleDeg), len=20;
     const dx=Math.cos(r)*len, dy=-Math.sin(r)*len;
-    svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${y}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${loadMarkerId})"/>`;
+    svg += `<line x1="${(px-dx).toFixed(1)}" y1="${(y-dy).toFixed(1)}" x2="${px.toFixed(1)}" y2="${(y-Math.sign(dy)*8).toFixed(1)}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${loadMarkerId})"/>`;
   });
   state.moments.forEach(m=>{
     const px=toPx(m.x);
@@ -3139,8 +3272,8 @@ function gIconCortante(){
     <line x1="20" y1="52" x2="200" y2="52" stroke="var(--ink-dim)" stroke-width="2"/>
     <line x1="110" y1="18" x2="110" y2="86" stroke="var(--accent)" stroke-width="2.2"/>
     <text x="110" y="10" text-anchor="middle" font-size="7.5" font-weight="700" fill="var(--accent)">seção</text>
-    <line x1="95" y1="52" x2="95" y2="80" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
-    <line x1="125" y1="52" x2="125" y2="24" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
+    <line x1="95" y1="61" x2="95" y2="85" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
+    <line x1="125" y1="43" x2="125" y2="19" stroke="var(--v-color)" stroke-width="2.2" marker-end="url(#${id})"/>
     <text x="110" y="100" text-anchor="middle" font-size="9" fill="var(--v-color)">positivo → gira no sentido horário</text>
     <circle cx="${ccx}" cy="${ccy}" r="${cr}" fill="var(--surface)" stroke="var(--v-color)" stroke-width="2.2"/>
     <line x1="${ccx}" y1="${ccy-cr+4}" x2="${ccx}" y2="${ccy-cr+9}" stroke="var(--v-color)" stroke-width="1.6"/>
@@ -3150,8 +3283,8 @@ function gIconCortante(){
     <!-- miniatura do corte com os dois vetores, igual à ilustração da esquerda -->
     <line x1="${ccx-17}" y1="${ccy}" x2="${ccx+17}" y2="${ccy}" stroke="var(--ink-dim)" stroke-width="2"/>
     <line x1="${ccx}" y1="${ccy-16}" x2="${ccx}" y2="${ccy+16}" stroke="var(--accent)" stroke-width="2.6"/>
-    <line x1="${ccx-9}" y1="${ccy}" x2="${ccx-9}" y2="${ccy+15}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
-    <line x1="${ccx+9}" y1="${ccy}" x2="${ccx+9}" y2="${ccy-15}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
+    <line x1="${ccx-9}" y1="${ccy+9}" x2="${ccx-9}" y2="${ccy+20}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
+    <line x1="${ccx+9}" y1="${ccy-9}" x2="${ccx+9}" y2="${ccy-20}" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${id})"/>
     <path d="M ${ccx} ${ccy-cr-6} A ${cr+6} ${cr+6} 0 0 1 ${ccx+cr+6} ${ccy}" fill="none" stroke="var(--v-color)" stroke-width="2" marker-end="url(#${idClock})"/>
     <text x="${ccx}" y="${ccy+cr+20}" text-anchor="middle" font-size="9" fill="var(--v-color)">sentido horário</text>
     <defs>
@@ -3291,10 +3424,19 @@ function renderResultsBody(data){
   body.appendChild(reactionsWrap);
 
   const dclWrap=document.createElement('div');
+  // cota individual de cada elemento no DCL (não só o vão inteiro): apoios, rótulas, cargas concentradas,
+  // momentos aplicados e início/fim de cada carga distribuída
+  const dclLandmarks = [
+    ...model.nodes.filter(n=>n.support).map(n=>n.x),
+    ...model.nodes.filter(n=>n.hinge).map(n=>n.x),
+    ...state.pointLoads.map(p=>p.x),
+    ...state.moments.map(m=>m.x),
+    ...state.distLoads.flatMap(d=>[d.x1, d.x2]),
+  ];
   dclWrap.innerHTML = `<h3 style="font-size:0.8rem;margin:18px 0 8px;">Diagrama de Corpo Livre (DCL)</h3>
     <p class="hint" style="margin-top:-4px;">A viga isolada, com todas as cargas aplicadas e todas as reações de apoio já calculadas:</p>
     ${freeBodyDiagramSVG(model, res)}
-    ${diagramCotaSVG(model.nodes[model.nodes.length-1].x)}`;
+    ${diagramCotaSVG(model.nodes[model.nodes.length-1].x, dclLandmarks)}`;
   body.appendChild(dclWrap);
 
   const diagramsHeading=document.createElement('h3'); diagramsHeading.style.cssText='font-size:0.8rem;margin:18px 0 8px;'; diagramsHeading.textContent='Diagramas de esforços';
